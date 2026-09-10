@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FormWheel Risk</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f5f6f8;color:#17181c}
+button,input{font:inherit}
+button{cursor:pointer;border:0}
+.app{max-width:760px;margin:auto;padding:24px 16px 40px}
+.top{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px}
+.logo{font-size:24px;font-weight:800;letter-spacing:-1px;color:#17181c;text-decoration:none}
+.badge{font-size:12px;font-weight:700;padding:7px 10px;border-radius:999px;background:#111;color:#fff}
+.card{background:#fff;border:1px solid #e7e8eb;border-radius:22px;padding:24px;box-shadow:0 8px 30px rgba(0,0,0,.05)}
+.hidden{display:none!important}
+h1{margin:0 0 8px;font-size:32px;letter-spacing:-1.5px}
+h2{margin:0 0 10px;letter-spacing:-.7px}
+p{color:#6b6f78}
+input{width:100%;padding:15px 16px;border:1px solid #dddfe4;border-radius:14px;outline:0;margin:8px 0 12px}
+input:focus{border-color:#111}
+.primary{width:100%;padding:15px;border-radius:14px;background:#111;color:#fff;font-weight:750}
+.secondary{padding:12px 16px;border-radius:12px;background:#f0f1f3;font-weight:700}
+.row{display:flex;gap:10px;align-items:center}
+.room{font-size:30px;font-weight:850;letter-spacing:5px;text-align:center;padding:16px;background:#f5f6f8;border-radius:15px;margin:16px 0}
+.players{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin:16px 0}
+.player{padding:14px;border:1px solid #e5e6ea;border-radius:15px;display:flex;justify-content:space-between}
+.player.me{border-color:#111}
+.small{font-size:13px;color:#777}
+.game-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px}
+.round{font-weight:800}
+.score{font-size:13px;color:#666}
+.result{padding:22px;border-radius:18px;background:#f5f6f8;text-align:center;margin:14px 0}
+.result .emoji{font-size:44px}
+.result .big{font-size:28px;font-weight:850;margin-top:6px}
+.bet-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin:14px 0}
+.bet{padding:14px 8px;border-radius:13px;background:#f0f1f3;font-weight:800}
+.bet.selected{background:#111;color:#fff}
+.bet:disabled{opacity:.45;cursor:not-allowed}
+.players-game{display:grid;gap:9px;margin-bottom:16px}
+.pbar{display:flex;justify-content:space-between;padding:12px 14px;border-radius:12px;background:#f6f6f7}
+.log{font-size:13px;color:#666;line-height:1.6;max-height:120px;overflow:auto}
+.center{text-align:center}
+.notice{padding:12px 14px;background:#fff8df;border-radius:12px;color:#725d16;font-size:13px;margin:12px 0}
+@media(max-width:520px){.bet-grid{grid-template-columns:repeat(2,1fr)}.card{padding:19px}}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="top"><a class="logo" href="https://semicolonxss.github.io/Formwheel/" aria-label="FormWheel 메인으로">FormWheel</a><div class="badge">RISK</div></div>
+
+  <section id="home" class="card">
+    <h1>Risk 🎲</h1>
+    <p>점수를 걸고, 운과 배짱으로 승부하세요.</p>
+    <input id="nameInput" maxlength="12" placeholder="닉네임을 입력하세요">
+    <div class="row">
+      <button class="primary" id="createBtn">방 만들기</button>
+      <button class="secondary" id="joinBtn">참가</button>
+    </div>
+    <div id="joinArea" class="hidden">
+      <input id="roomInput" maxlength="6" placeholder="방 코드 6자리">
+      <button class="primary" id="joinConfirm">방 참가하기</button>
+    </div>
+  </section>
+
+  <section id="lobby" class="card hidden">
+    <h2>대기실</h2>
+    <p>방 코드</p>
+    <div id="roomCode" class="room"></div>
+    <div id="players" class="players"></div>
+    <div id="hostNotice" class="notice"></div>
+    <button id="startBtn" class="primary">게임 시작</button>
+  </section>
+
+  <section id="game" class="card hidden">
+    <div class="game-head">
+      <div class="round" id="roundText">ROUND 1 / 7</div>
+      <div class="score" id="myScore">내 점수 1,000</div>
+    </div>
+    <div id="resultBox" class="result hidden"></div>
+    <div id="betArea">
+      <h2>얼마를 걸까요?</h2>
+      <p>많이 걸수록 보상도, 위험도 커집니다.</p>
+      <div class="bet-grid" id="betGrid"></div>
+      <button id="betBtn" class="primary" disabled>베팅하기</button>
+    </div>
+    <div class="players-game" id="gamePlayers"></div>
+    <div id="gameLog" class="log"></div>
+  </section>
+
+  <section id="end" class="card hidden center">
+    <h1>🏆 GAME OVER</h1>
+    <p id="winnerText"></p>
+    <div id="finalScores" class="players-game"></div>
+    <button class="primary" onclick="location.reload()">다시 하기</button>
+  </section>
+</div>
+
+<script>
+const MAX_PLAYERS=4, START_SCORE=1000, ROUNDS=7;
+let state={screen:"home",room:"",host:false,name:"",players:[],round:1,selected:null,results:[],pending:false};
+const $=id=>document.getElementById(id);
+const fmt=n=>n.toLocaleString("ko-KR");
+function show(id){["home","lobby","game","end"].forEach(x=>$(x).classList.toggle("hidden",x!==id));}
+function randomCode(){return Math.floor(100000+Math.random()*900000).toString();}
+function getName(){
+  const n=$("nameInput").value.trim();
+  if(!n){alert("닉네임을 입력해주세요.");return null}
+  return n;
+}
+function renderLobby(){
+  $("roomCode").textContent=state.room;
+  $("players").innerHTML=state.players.map((p,i)=>`<div class="player ${p.name===state.name?"me":""}">
+    <b>${escapeHtml(p.name)}</b><span>${i===0?"👑 호스트":"플레이어"}</span></div>`).join("");
+  $("hostNotice").textContent=state.host?"호스트가 시작 버튼을 눌러 게임을 시작하세요.":"호스트가 게임을 시작할 때까지 기다려주세요.";
+  $("startBtn").classList.toggle("hidden",!state.host);
+}
+function escapeHtml(s){return s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+
+$("createBtn").onclick=()=>{
+  const n=getName(); if(!n)return;
+  state.name=n;state.room=randomCode();state.host=true;
+  state.players=[{name:n,score:START_SCORE,bet:null}];
+  renderLobby();show("lobby");
+};
+$("joinBtn").onclick=()=>$("joinArea").classList.toggle("hidden");
+$("joinConfirm").onclick=()=>{
+  const n=getName(); if(!n)return;
+  const r=$("roomInput").value.trim();
+  if(!/^\d{6}$/.test(r)){alert("6자리 방 코드를 입력해주세요.");return}
+  state.name=n;state.room=r;state.host=false;
+  state.players=[
+    {name:"호스트",score:START_SCORE,bet:null},
+    {name:n,score:START_SCORE,bet:null}
+  ];
+  renderLobby();show("lobby");
+  $("hostNotice").textContent="데모 모드: 다른 플레이어는 예시 참가자로 표시됩니다.";
+};
+$("startBtn").onclick=startGame;
+
+function startGame(){
+  if(state.players.length<2){
+    state.players.push({name:"Player 2",score:START_SCORE,bet:null});
+  }
+  state.players=state.players.slice(0,MAX_PLAYERS);
+  state.round=1;state.results=[];show("game");renderGame();
+}
+function renderGame(){
+  $("roundText").textContent=`ROUND ${state.round} / ${ROUNDS}`;
+  const me=state.players.find(p=>p.name===state.name)||state.players[0];
+  $("myScore").textContent=`내 점수 ${fmt(me.score)}`;
+  const max=Math.max(0,me.score);
+  const bets=[Math.min(100,max),Math.min(250,max),Math.min(500,max),max];
+  const labels=["100","250","500","ALL-IN"];
+  $("betGrid").innerHTML=labels.map((l,i)=>`<button class="bet ${state.selected===bets[i]&&bets[i]>0?"selected":""}" ${bets[i]<=0?"disabled":""} onclick="selectBet(${bets[i]})">${l}</button>`).join("");
+  $("betBtn").disabled=!state.selected||state.pending;
+  $("gamePlayers").innerHTML=state.players.map(p=>`<div class="pbar"><span>${escapeHtml(p.name)}</span><b>${fmt(p.score)}</b></div>`).join("");
+}
+function selectBet(v){
+  if(state.pending)return;
+  state.selected=v;renderGame();
+}
+$("betBtn").onclick=resolveRound;
+
+function resolveRound(){
+  if(!state.selected)return;
+  state.pending=true;
+  state.players.forEach(p=>{
+    if(p.name===state.name)p.bet=state.selected;
+    else{
+      const max=Math.max(0,p.score);
+      const choices=[Math.min(100,max),Math.min(250,max),Math.min(500,max),max].filter(x=>x>0);
+      p.bet=choices[Math.floor(Math.random()*choices.length)]||0;
+    }
+  });
+  $("betArea").classList.add("hidden");
+  $("gamePlayers").innerHTML=state.players.map(p=>`<div class="pbar"><span>${escapeHtml(p.name)} · 베팅 ${fmt(p.bet)}</span><b>${fmt(p.score)}</b></div>`).join("");
+  setTimeout(()=>{
+    const outcomes=["success","success","success","jackpot","fail","fail","bomb"];
+    state.results=state.players.map(p=>{
+      const outcome=outcomes[Math.floor(Math.random()*outcomes.length)];
+      let delta=0,emoji="🟢",label="성공!";
+      if(outcome==="success"){delta=p.bet;emoji="🟢";label="성공!";}
+      if(outcome==="jackpot"){delta=p.bet*2;emoji="⚡";label="대박!";}
+      if(outcome==="fail"){delta=-p.bet;emoji="🔴";label="실패...";}
+      if(outcome==="bomb"){delta=-p.bet*2;emoji="💀";label="폭탄!";}
+      delta=Math.max(-p.score,delta);p.score+=delta;
+      return {name:p.name,delta,emoji,label};
+    });
+    const mine=state.results.find(x=>x.name===state.name)||state.results[0];
+    $("resultBox").innerHTML=`<div class="emoji">${mine.emoji}</div><div class="big">${mine.label}</div><div>${mine.delta>=0?"+":""}${fmt(mine.delta)}점</div>`;
+    $("resultBox").classList.remove("hidden");
+    $("gameLog").innerHTML=state.results.map(r=>`${r.emoji} ${escapeHtml(r.name)}: ${r.delta>=0?"+":""}${fmt(r.delta)}점`).join("<br>")+"<br>"+$("gameLog").innerHTML;
+    state.players.forEach(p=>p.bet=null);
+    if(state.round>=ROUNDS){
+      setTimeout(endGame,1800);
+    }else{
+      state.round++;state.selected=null;state.pending=false;
+      setTimeout(()=>{$("resultBox").classList.add("hidden");$("betArea").classList.remove("hidden");renderGame()},1800);
+    }
+  },700);
+};
+function endGame(){
+  const sorted=[...state.players].sort((a,b)=>b.score-a.score);
+  $("winnerText").textContent=`${sorted[0].name}님이 ${fmt(sorted[0].score)}점으로 우승했습니다!`;
+  $("finalScores").innerHTML=sorted.map((p,i)=>`<div class="pbar"><span>${i+1}위 · ${escapeHtml(p.name)}</span><b>${fmt(p.score)}점</b></div>`).join("");
+  show("end");
+}
+</script>
+</body>
+</html>
