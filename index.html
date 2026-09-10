@@ -220,7 +220,7 @@ $("createBtn").onclick=async ()=>{
   const room={
     code, phase:"lobby", round:1, hostId:CLIENT_ID,
     players:[{id:CLIENT_ID,name:n,score:START_SCORE,bet:null}],
-    log:[], lastResult:null
+    log:[], lastResult:null, endReason:null
   };
   const ok=await saveRoom(room);
   if(!ok)return;
@@ -255,7 +255,7 @@ $("startBtn").onclick=async ()=>{
   if(!state.room)return;
   const fresh=await loadRoom(state.room.code) || state.room;
   if(!isHost(fresh)){alert("호스트만 게임을 시작할 수 있습니다.");return}
-  fresh.phase="playing"; fresh.round=1; fresh.log=[]; fresh.lastResult=null;
+  fresh.phase="playing"; fresh.round=1; fresh.log=[]; fresh.lastResult=null; fresh.endReason=null;
   fresh.players.forEach(p=>{p.score=START_SCORE;p.bet=null;});
   const ok=await saveRoom(fresh);
   if(!ok)return;
@@ -346,8 +346,14 @@ async function resolveRound(room){
   room.lastResult={round:room.round, results};
   room.log=[{round:room.round, results}, ...(room.log||[])].slice(0,20);
 
-  if(room.round>=ROUNDS){
+  // 점수가 0(이하)이 된 플레이어가 있으면 라운드 수와 상관없이 즉시 게임 종료
+  const bustedPlayers = room.players.filter(p=>p.score<=0);
+  if(bustedPlayers.length>0){
     room.phase="ended";
+    room.endReason={type:"bust", names:bustedPlayers.map(p=>p.name)};
+  }else if(room.round>=ROUNDS){
+    room.phase="ended";
+    room.endReason={type:"rounds"};
   }else{
     room.round+=1;
   }
@@ -368,6 +374,15 @@ function handlePlayingUpdate(){
     state.selected=null;
     state.localRound=room.round;
 
+    // 게임이 이미 종료(누군가 0점 도달 등)된 경우, 결과창을 잠깐 보여준 뒤
+    // 다음 라운드 베팅 화면 대신 종료 화면으로 전환한다.
+    if(room.phase==="ended"){
+      setTimeout(()=>{
+        renderEnd();
+      },1800);
+      return;
+    }
+
     setTimeout(()=>{
       $("resultBox").classList.add("hidden");
       $("betArea").classList.remove("hidden");
@@ -380,8 +395,24 @@ function handlePlayingUpdate(){
 
 function renderEnd(){
   const room=state.room; if(!room)return;
+  stopListening();
   const sorted=[...room.players].sort((a,b)=>b.score-a.score);
-  $("winnerText").textContent=`${escapeHtml(sorted[0].name)}님이 ${fmt(sorted[0].score)}점으로 우승했습니다!`;
+
+  if(room.endReason && room.endReason.type==="bust"){
+    const bustedNames=room.endReason.names.map(escapeHtml).join(", ");
+    const survivors=sorted.filter(p=>p.score>0);
+    if(survivors.length===1){
+      $("winnerText").textContent=`${bustedNames}님의 점수가 0이 되어 게임 종료! ${escapeHtml(survivors[0].name)}님이 승리했습니다!`;
+    }else if(survivors.length>1){
+      const names=survivors.map(p=>escapeHtml(p.name)).join(", ");
+      $("winnerText").textContent=`${bustedNames}님의 점수가 0이 되어 게임 종료! 나머지 플레이어(${names})가 승리했습니다!`;
+    }else{
+      $("winnerText").textContent=`${bustedNames}님의 점수가 0이 되어 게임이 종료되었습니다.`;
+    }
+  }else{
+    $("winnerText").textContent=`${escapeHtml(sorted[0].name)}님이 ${fmt(sorted[0].score)}점으로 우승했습니다!`;
+  }
+
   $("finalScores").innerHTML=sorted.map((p,i)=>`<div class="pbar"><span>${i+1}위 · ${escapeHtml(p.name)}${p.id===CLIENT_ID?" (나)":""}</span><b>${fmt(p.score)}점</b></div>`).join("");
   show("end");
 }
