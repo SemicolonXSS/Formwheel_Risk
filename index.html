@@ -48,6 +48,7 @@ input:focus{border-color:#111}
 .center{text-align:center}
 .notice{padding:12px 14px;background:#fff8df;border-radius:12px;color:#725d16;font-size:13px;margin:12px 0}
 .waitmsg{text-align:center;color:#777;font-size:14px;padding:10px 0}
+.connerr{text-align:center;color:#b42318;font-size:13px;margin-top:10px}
 @media(max-width:520px){.bet-grid{grid-template-columns:repeat(2,1fr)}.card{padding:19px}}
 </style>
 </head>
@@ -67,6 +68,7 @@ input:focus{border-color:#111}
       <input id="roomInput" maxlength="6" placeholder="방 코드 6자리">
       <button class="primary" id="joinConfirm">방 참가하기</button>
     </div>
+    <div id="connErr" class="connerr hidden"></div>
   </section>
 
   <section id="lobby" class="card hidden">
@@ -103,7 +105,23 @@ input:focus{border-color:#111}
   </section>
 </div>
 
-<script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js";
+import { getDatabase, ref, set, get, onValue } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBreTSe1m0-xlbF4aupnU5isRZCihR25IE",
+  authDomain: "formwheel.firebaseapp.com",
+  databaseURL: "https://formwheel-default-rtdb.firebaseio.com",
+  projectId: "formwheel",
+  storageBucket: "formwheel.firebasestorage.app",
+  messagingSenderId: "431583088241",
+  appId: "1:431583088241:web:74e0e34ea1e3e1170c55d0",
+  measurementId: "G-T372YXDF8D"
+};
+const fbApp = initializeApp(firebaseConfig);
+const db = getDatabase(fbApp);
+
 const MAX_PLAYERS=4, START_SCORE=1000, ROUNDS=7;
 const CLIENT_ID = (crypto.randomUUID ? crypto.randomUUID() : ("c"+Math.random().toString(36).slice(2)+Date.now()));
 
@@ -111,10 +129,10 @@ const CLIENT_ID = (crypto.randomUUID ? crypto.randomUUID() : ("c"+Math.random().
 const ODDS = { success: 38.57, jackpot: 12.14, fail: 32.86, bomb: 16.43 };
 
 let state={
-  screen:"home", room:null, name:"",
-  selected:null, pending:false,
+  room:null, name:"",
+  selected:null,
   shownResultRound:0, localRound:1,
-  pollTimer:null
+  unsubscribe:null
 };
 
 const $=id=>document.getElementById(id);
@@ -127,18 +145,22 @@ function getName(){
   if(!n){alert("닉네임을 입력해주세요.");return null}
   return n;
 }
-function roomKey(code){return `risk-room:${code}`;}
+function roomRef(code){ return ref(db, "rooms/"+code); }
+function showConnErr(msg){ const el=$("connErr"); el.textContent=msg; el.classList.remove("hidden"); }
 
 async function loadRoom(code){
   try{
-    const r=await window.storage.get(roomKey(code), true);
-    return r ? JSON.parse(r.value) : null;
-  }catch(e){ return null; }
+    const snap=await get(roomRef(code));
+    return snap.exists() ? snap.val() : null;
+  }catch(e){
+    showConnErr("Firebase에 연결할 수 없습니다. 데이터베이스 규칙과 네트워크를 확인해주세요.");
+    return null;
+  }
 }
 async function saveRoom(room){
   room.updatedAt=Date.now();
   try{
-    await window.storage.set(roomKey(room.code), JSON.stringify(room), true);
+    await set(roomRef(room.code), room);
     state.room=room;
     return true;
   }catch(e){
@@ -146,8 +168,49 @@ async function saveRoom(room){
     return false;
   }
 }
-function me(room){ return room ? room.players.find(p=>p.id===CLIENT_ID) : null; }
+function me(room){ return room ? (room.players||[]).find(p=>p.id===CLIENT_ID) : null; }
 function isHost(room){ return room && room.hostId===CLIENT_ID; }
+
+function startListening(code){
+  if(state.unsubscribe) state.unsubscribe();
+  state.unsubscribe = onValue(roomRef(code), (snapshot)=>{
+    const fresh=snapshot.val();
+    if(!fresh)return;
+    handleRoomSnapshot(fresh);
+  }, ()=>{ showConnErr("실시간 연결이 끊겼습니다. 새로고침해주세요."); });
+}
+function stopListening(){
+  if(state.unsubscribe){ state.unsubscribe(); state.unsubscribe=null; }
+}
+
+async function handleRoomSnapshot(fresh){
+  const prevPhase = state.room ? state.room.phase : null;
+  state.room=fresh;
+  fresh.players = fresh.players || [];
+
+  if(fresh.phase==="lobby"){
+    renderLobby();
+  }
+  if(fresh.phase==="playing"){
+    if(prevPhase==="lobby"){
+      state.localRound=fresh.round; state.shownResultRound=0; state.selected=null;
+      show("game");
+    }
+    handlePlayingUpdate();
+  }
+  if(fresh.phase==="ended"){
+    stopListening();
+    renderEnd();
+  }
+
+  if(isHost(fresh) && fresh.phase==="playing"){
+    const allBet = fresh.players.length>0 && fresh.players.every(p=>p.bet!=null);
+    const alreadyResolved = fresh.lastResult && fresh.lastResult.round===fresh.round;
+    if(allBet && !alreadyResolved){
+      await resolveRound(fresh);
+    }
+  }
+}
 
 // ---------- 홈 / 방 생성·참가 ----------
 $("createBtn").onclick=async ()=>{
@@ -161,7 +224,7 @@ $("createBtn").onclick=async ()=>{
   };
   const ok=await saveRoom(room);
   if(!ok)return;
-  startPolling();
+  startListening(code);
   renderLobby();
   show("lobby");
 };
@@ -174,16 +237,16 @@ $("joinConfirm").onclick=async ()=>{
   if(!/^\d{6}$/.test(code)){alert("6자리 방 코드를 입력해주세요.");return}
   const room=await loadRoom(code);
   if(!room){alert("방을 찾을 수 없습니다. 코드를 확인해주세요.");return}
+  room.players = room.players || [];
   if(room.phase!=="lobby"){alert("이미 시작된 게임입니다.");return}
   if(room.players.length>=MAX_PLAYERS){alert("방 인원이 가득 찼습니다.");return}
-  if(room.players.some(p=>p.id===CLIENT_ID)){ /* 이미 참가한 경우 그대로 진행 */ }
-  else{
+  if(!room.players.some(p=>p.id===CLIENT_ID)){
     room.players.push({id:CLIENT_ID,name:n,score:START_SCORE,bet:null});
     const ok=await saveRoom(room);
     if(!ok)return;
   }
   state.name=n; state.room=room;
-  startPolling();
+  startListening(code);
   renderLobby();
   show("lobby");
 };
@@ -194,52 +257,12 @@ $("startBtn").onclick=async ()=>{
   if(!isHost(fresh)){alert("호스트만 게임을 시작할 수 있습니다.");return}
   fresh.phase="playing"; fresh.round=1; fresh.log=[]; fresh.lastResult=null;
   fresh.players.forEach(p=>{p.score=START_SCORE;p.bet=null;});
-  await saveRoom(fresh);
-  state.localRound=1; state.shownResultRound=0; state.selected=null; state.pending=false;
+  const ok=await saveRoom(fresh);
+  if(!ok)return;
+  state.localRound=1; state.shownResultRound=0; state.selected=null;
   show("game");
   renderGame();
 };
-
-// ---------- 폴링 ----------
-function startPolling(){
-  if(state.pollTimer) clearInterval(state.pollTimer);
-  state.pollTimer=setInterval(pollRoom,1500);
-}
-function stopPolling(){
-  if(state.pollTimer) clearInterval(state.pollTimer);
-  state.pollTimer=null;
-}
-async function pollRoom(){
-  if(!state.room)return;
-  const fresh=await loadRoom(state.room.code);
-  if(!fresh)return;
-  const prevPhase=state.room.phase;
-  state.room=fresh;
-
-  if(prevPhase==="lobby" && fresh.phase==="lobby"){
-    renderLobby();
-  }
-  if(fresh.phase==="playing"){
-    if(prevPhase==="lobby"){ // 다른 참가자 화면에서 호스트가 막 시작한 경우
-      state.localRound=fresh.round; state.shownResultRound=0; state.selected=null; state.pending=false;
-      show("game");
-    }
-    handlePlayingUpdate();
-  }
-  if(fresh.phase==="ended"){
-    stopPolling();
-    renderEnd();
-  }
-
-  // 호스트: 전원 베팅 완료 시 라운드 결과 계산
-  if(isHost(fresh) && fresh.phase==="playing"){
-    const allBet = fresh.players.length>0 && fresh.players.every(p=>p.bet!=null);
-    const alreadyResolved = fresh.lastResult && fresh.lastResult.round===fresh.round;
-    if(allBet && !alreadyResolved){
-      await resolveRound(fresh);
-    }
-  }
-}
 
 // ---------- 대기실 ----------
 function renderLobby(){
@@ -275,7 +298,7 @@ function renderGame(){
   const labels=["100","250","500","ALL-IN"];
   const myBetPlaced = myself.bet!=null;
 
-  $("betGrid").innerHTML=labels.map((l,i)=>`<button class="bet ${state.selected===bets[i]&&bets[i]>0?"selected":""}" ${bets[i]<=0||myBetPlaced?"disabled":""} onclick="selectBet(${bets[i]})">${l}</button>`).join("");
+  $("betGrid").innerHTML=labels.map((l,i)=>`<button class="bet ${state.selected===bets[i]&&bets[i]>0?"selected":""}" ${bets[i]<=0||myBetPlaced?"disabled":""} onclick="window.selectBet(${bets[i]})">${l}</button>`).join("");
   $("betBtn").disabled = !state.selected || myBetPlaced;
   $("betBtn").classList.toggle("hidden", myBetPlaced);
   $("waitMsg").classList.toggle("hidden", !myBetPlaced);
@@ -293,6 +316,7 @@ function selectBet(v){
   state.selected=v;
   renderGame();
 }
+window.selectBet=selectBet;
 
 $("betBtn").onclick=async ()=>{
   if(!state.selected)return;
@@ -320,7 +344,7 @@ async function resolveRound(room){
   const results=room.players.map(p=>p._lastDelta);
   room.players.forEach(p=>{delete p._lastDelta; p.bet=null;});
   room.lastResult={round:room.round, results};
-  room.log=[{round:room.round, results}, ...room.log].slice(0,20);
+  room.log=[{round:room.round, results}, ...(room.log||[])].slice(0,20);
 
   if(room.round>=ROUNDS){
     room.phase="ended";
@@ -328,7 +352,6 @@ async function resolveRound(room){
     room.round+=1;
   }
   await saveRoom(room);
-  handlePlayingUpdate();
 }
 
 function handlePlayingUpdate(){
