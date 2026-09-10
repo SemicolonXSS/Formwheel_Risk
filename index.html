@@ -21,6 +21,7 @@ p{color:#6b6f78}
 input{width:100%;padding:15px 16px;border:1px solid #dddfe4;border-radius:14px;outline:0;margin:8px 0 12px}
 input:focus{border-color:#111}
 .primary{width:100%;padding:15px;border-radius:14px;background:#111;color:#fff;font-weight:750}
+.primary:disabled{opacity:.5;cursor:not-allowed}
 .secondary{padding:12px 16px;border-radius:12px;background:#f0f1f3;font-weight:700}
 .row{display:flex;gap:10px;align-items:center}
 .room{font-size:30px;font-weight:850;letter-spacing:5px;text-align:center;padding:16px;background:#f5f6f8;border-radius:15px;margin:16px 0}
@@ -40,9 +41,13 @@ input:focus{border-color:#111}
 .bet:disabled{opacity:.45;cursor:not-allowed}
 .players-game{display:grid;gap:9px;margin-bottom:16px}
 .pbar{display:flex;justify-content:space-between;padding:12px 14px;border-radius:12px;background:#f6f6f7}
+.pbar .tag{font-size:12px;color:#999;font-weight:700}
+.pbar .tag.wait{color:#b8860b}
+.pbar .tag.done{color:#1a7f37}
 .log{font-size:13px;color:#666;line-height:1.6;max-height:120px;overflow:auto}
 .center{text-align:center}
 .notice{padding:12px 14px;background:#fff8df;border-radius:12px;color:#725d16;font-size:13px;margin:12px 0}
+.waitmsg{text-align:center;color:#777;font-size:14px;padding:10px 0}
 @media(max-width:520px){.bet-grid{grid-template-columns:repeat(2,1fr)}.card{padding:19px}}
 </style>
 </head>
@@ -84,6 +89,7 @@ input:focus{border-color:#111}
       <p>많이 걸수록 보상도, 위험도 커집니다.</p>
       <div class="bet-grid" id="betGrid"></div>
       <button id="betBtn" class="primary" disabled>베팅하기</button>
+      <div id="waitMsg" class="waitmsg hidden">다른 플레이어의 베팅을 기다리는 중...</div>
     </div>
     <div class="players-game" id="gamePlayers"></div>
     <div id="gameLog" class="log"></div>
@@ -99,112 +105,261 @@ input:focus{border-color:#111}
 
 <script>
 const MAX_PLAYERS=4, START_SCORE=1000, ROUNDS=7;
-let state={screen:"home",room:"",host:false,name:"",players:[],round:1,selected:null,results:[],pending:false};
+const CLIENT_ID = (crypto.randomUUID ? crypto.randomUUID() : ("c"+Math.random().toString(36).slice(2)+Date.now()));
+
+// 결과 확률 (기존 대비 대박 -15%, 성공 -10%, 남는 확률은 실패:폭탄 = 2:1 비율로 재분배)
+const ODDS = { success: 38.57, jackpot: 12.14, fail: 32.86, bomb: 16.43 };
+
+let state={
+  screen:"home", room:null, name:"",
+  selected:null, pending:false,
+  shownResultRound:0, localRound:1,
+  pollTimer:null
+};
+
 const $=id=>document.getElementById(id);
 const fmt=n=>n.toLocaleString("ko-KR");
 function show(id){["home","lobby","game","end"].forEach(x=>$(x).classList.toggle("hidden",x!==id));}
 function randomCode(){return Math.floor(100000+Math.random()*900000).toString();}
+function escapeHtml(s){return s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
 function getName(){
   const n=$("nameInput").value.trim();
   if(!n){alert("닉네임을 입력해주세요.");return null}
   return n;
 }
-function renderLobby(){
-  $("roomCode").textContent=state.room;
-  $("players").innerHTML=state.players.map((p,i)=>`<div class="player ${p.name===state.name?"me":""}">
-    <b>${escapeHtml(p.name)}</b><span>${i===0?"👑 호스트":"플레이어"}</span></div>`).join("");
-  $("hostNotice").textContent=state.host?"호스트가 시작 버튼을 눌러 게임을 시작하세요.":"호스트가 게임을 시작할 때까지 기다려주세요.";
-  $("startBtn").classList.toggle("hidden",!state.host);
+function roomKey(code){return `risk-room:${code}`;}
+
+async function loadRoom(code){
+  try{
+    const r=await window.storage.get(roomKey(code), true);
+    return r ? JSON.parse(r.value) : null;
+  }catch(e){ return null; }
 }
-function escapeHtml(s){return s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
-
-$("createBtn").onclick=()=>{
-  const n=getName(); if(!n)return;
-  state.name=n;state.room=randomCode();state.host=true;
-  state.players=[{name:n,score:START_SCORE,bet:null}];
-  renderLobby();show("lobby");
-};
-$("joinBtn").onclick=()=>$("joinArea").classList.toggle("hidden");
-$("joinConfirm").onclick=()=>{
-  const n=getName(); if(!n)return;
-  const r=$("roomInput").value.trim();
-  if(!/^\d{6}$/.test(r)){alert("6자리 방 코드를 입력해주세요.");return}
-  state.name=n;state.room=r;state.host=false;
-  state.players=[
-    {name:"호스트",score:START_SCORE,bet:null},
-    {name:n,score:START_SCORE,bet:null}
-  ];
-  renderLobby();show("lobby");
-  $("hostNotice").textContent="데모 모드: 다른 플레이어는 예시 참가자로 표시됩니다.";
-};
-$("startBtn").onclick=startGame;
-
-function startGame(){
-  if(state.players.length<2){
-    state.players.push({name:"Player 2",score:START_SCORE,bet:null});
+async function saveRoom(room){
+  room.updatedAt=Date.now();
+  try{
+    await window.storage.set(roomKey(room.code), JSON.stringify(room), true);
+    state.room=room;
+    return true;
+  }catch(e){
+    alert("연결에 문제가 발생했습니다. 다시 시도해주세요.");
+    return false;
   }
-  state.players=state.players.slice(0,MAX_PLAYERS);
-  state.round=1;state.results=[];show("game");renderGame();
 }
+function me(room){ return room ? room.players.find(p=>p.id===CLIENT_ID) : null; }
+function isHost(room){ return room && room.hostId===CLIENT_ID; }
+
+// ---------- 홈 / 방 생성·참가 ----------
+$("createBtn").onclick=async ()=>{
+  const n=getName(); if(!n)return;
+  state.name=n;
+  const code=randomCode();
+  const room={
+    code, phase:"lobby", round:1, hostId:CLIENT_ID,
+    players:[{id:CLIENT_ID,name:n,score:START_SCORE,bet:null}],
+    log:[], lastResult:null
+  };
+  const ok=await saveRoom(room);
+  if(!ok)return;
+  startPolling();
+  renderLobby();
+  show("lobby");
+};
+
+$("joinBtn").onclick=()=>$("joinArea").classList.toggle("hidden");
+
+$("joinConfirm").onclick=async ()=>{
+  const n=getName(); if(!n)return;
+  const code=$("roomInput").value.trim();
+  if(!/^\d{6}$/.test(code)){alert("6자리 방 코드를 입력해주세요.");return}
+  const room=await loadRoom(code);
+  if(!room){alert("방을 찾을 수 없습니다. 코드를 확인해주세요.");return}
+  if(room.phase!=="lobby"){alert("이미 시작된 게임입니다.");return}
+  if(room.players.length>=MAX_PLAYERS){alert("방 인원이 가득 찼습니다.");return}
+  if(room.players.some(p=>p.id===CLIENT_ID)){ /* 이미 참가한 경우 그대로 진행 */ }
+  else{
+    room.players.push({id:CLIENT_ID,name:n,score:START_SCORE,bet:null});
+    const ok=await saveRoom(room);
+    if(!ok)return;
+  }
+  state.name=n; state.room=room;
+  startPolling();
+  renderLobby();
+  show("lobby");
+};
+
+$("startBtn").onclick=async ()=>{
+  if(!state.room)return;
+  const fresh=await loadRoom(state.room.code) || state.room;
+  if(!isHost(fresh)){alert("호스트만 게임을 시작할 수 있습니다.");return}
+  fresh.phase="playing"; fresh.round=1; fresh.log=[]; fresh.lastResult=null;
+  fresh.players.forEach(p=>{p.score=START_SCORE;p.bet=null;});
+  await saveRoom(fresh);
+  state.localRound=1; state.shownResultRound=0; state.selected=null; state.pending=false;
+  show("game");
+  renderGame();
+};
+
+// ---------- 폴링 ----------
+function startPolling(){
+  if(state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer=setInterval(pollRoom,1500);
+}
+function stopPolling(){
+  if(state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer=null;
+}
+async function pollRoom(){
+  if(!state.room)return;
+  const fresh=await loadRoom(state.room.code);
+  if(!fresh)return;
+  const prevPhase=state.room.phase;
+  state.room=fresh;
+
+  if(prevPhase==="lobby" && fresh.phase==="lobby"){
+    renderLobby();
+  }
+  if(fresh.phase==="playing"){
+    if(prevPhase==="lobby"){ // 다른 참가자 화면에서 호스트가 막 시작한 경우
+      state.localRound=fresh.round; state.shownResultRound=0; state.selected=null; state.pending=false;
+      show("game");
+    }
+    handlePlayingUpdate();
+  }
+  if(fresh.phase==="ended"){
+    stopPolling();
+    renderEnd();
+  }
+
+  // 호스트: 전원 베팅 완료 시 라운드 결과 계산
+  if(isHost(fresh) && fresh.phase==="playing"){
+    const allBet = fresh.players.length>0 && fresh.players.every(p=>p.bet!=null);
+    const alreadyResolved = fresh.lastResult && fresh.lastResult.round===fresh.round;
+    if(allBet && !alreadyResolved){
+      await resolveRound(fresh);
+    }
+  }
+}
+
+// ---------- 대기실 ----------
+function renderLobby(){
+  const room=state.room; if(!room)return;
+  $("roomCode").textContent=room.code;
+  $("players").innerHTML=room.players.map(p=>`<div class="player ${p.id===CLIENT_ID?"me":""}">
+    <b>${escapeHtml(p.name)}</b><span>${p.id===room.hostId?"👑 호스트":"플레이어"}</span></div>`).join("");
+  const iAmHost=isHost(room);
+  $("hostNotice").textContent=iAmHost
+    ? `방 코드를 공유하고 참가자가 모이면 시작 버튼을 눌러주세요. (최대 ${MAX_PLAYERS}명)`
+    : "호스트가 게임을 시작할 때까지 기다려주세요.";
+  $("startBtn").classList.toggle("hidden",!iAmHost);
+}
+
+// ---------- 게임 화면 ----------
+function pickOutcome(){
+  const r=Math.random()*100;
+  if(r<ODDS.success) return "success";
+  if(r<ODDS.success+ODDS.jackpot) return "jackpot";
+  if(r<ODDS.success+ODDS.jackpot+ODDS.fail) return "fail";
+  return "bomb";
+}
+
 function renderGame(){
-  $("roundText").textContent=`ROUND ${state.round} / ${ROUNDS}`;
-  const me=state.players.find(p=>p.name===state.name)||state.players[0];
-  $("myScore").textContent=`내 점수 ${fmt(me.score)}`;
-  const max=Math.max(0,me.score);
+  const room=state.room; if(!room)return;
+  const myself=me(room);
+  if(!myself)return;
+  $("roundText").textContent=`ROUND ${room.round} / ${ROUNDS}`;
+  $("myScore").textContent=`내 점수 ${fmt(myself.score)}`;
+
+  const max=Math.max(0,myself.score);
   const bets=[Math.min(100,max),Math.min(250,max),Math.min(500,max),max];
   const labels=["100","250","500","ALL-IN"];
-  $("betGrid").innerHTML=labels.map((l,i)=>`<button class="bet ${state.selected===bets[i]&&bets[i]>0?"selected":""}" ${bets[i]<=0?"disabled":""} onclick="selectBet(${bets[i]})">${l}</button>`).join("");
-  $("betBtn").disabled=!state.selected||state.pending;
-  $("gamePlayers").innerHTML=state.players.map(p=>`<div class="pbar"><span>${escapeHtml(p.name)}</span><b>${fmt(p.score)}</b></div>`).join("");
-}
-function selectBet(v){
-  if(state.pending)return;
-  state.selected=v;renderGame();
-}
-$("betBtn").onclick=resolveRound;
+  const myBetPlaced = myself.bet!=null;
 
-function resolveRound(){
+  $("betGrid").innerHTML=labels.map((l,i)=>`<button class="bet ${state.selected===bets[i]&&bets[i]>0?"selected":""}" ${bets[i]<=0||myBetPlaced?"disabled":""} onclick="selectBet(${bets[i]})">${l}</button>`).join("");
+  $("betBtn").disabled = !state.selected || myBetPlaced;
+  $("betBtn").classList.toggle("hidden", myBetPlaced);
+  $("waitMsg").classList.toggle("hidden", !myBetPlaced);
+
+  $("gamePlayers").innerHTML=room.players.map(p=>{
+    const tag = p.bet!=null ? `<span class="tag done">베팅완료</span>` : `<span class="tag wait">대기중</span>`;
+    return `<div class="pbar"><span>${escapeHtml(p.name)}${p.id===CLIENT_ID?" (나)":""}</span><span style="display:flex;gap:8px;align-items:center"><b>${fmt(p.score)}</b>${tag}</span></div>`;
+  }).join("");
+}
+
+function selectBet(v){
+  const room=state.room; if(!room)return;
+  const myself=me(room);
+  if(!myself || myself.bet!=null)return;
+  state.selected=v;
+  renderGame();
+}
+
+$("betBtn").onclick=async ()=>{
   if(!state.selected)return;
-  state.pending=true;
-  state.players.forEach(p=>{
-    if(p.name===state.name)p.bet=state.selected;
-    else{
-      const max=Math.max(0,p.score);
-      const choices=[Math.min(100,max),Math.min(250,max),Math.min(500,max),max].filter(x=>x>0);
-      p.bet=choices[Math.floor(Math.random()*choices.length)]||0;
-    }
+  const fresh=await loadRoom(state.room.code) || state.room;
+  const myself=me(fresh);
+  if(!myself || myself.bet!=null)return;
+  myself.bet=state.selected;
+  const ok=await saveRoom(fresh);
+  if(!ok)return;
+  renderGame();
+};
+
+async function resolveRound(room){
+  room.players.forEach(p=>{
+    const outcome=pickOutcome();
+    let delta=0,emoji="🟢",label="성공!";
+    if(outcome==="success"){delta=p.bet;emoji="🟢";label="성공!";}
+    if(outcome==="jackpot"){delta=p.bet*2;emoji="⚡";label="대박!";}
+    if(outcome==="fail"){delta=-p.bet;emoji="🔴";label="실패...";}
+    if(outcome==="bomb"){delta=-p.bet*2;emoji="💀";label="폭탄!";}
+    delta=Math.max(-p.score,delta);
+    p.score+=delta;
+    p._lastDelta={id:p.id,name:p.name,delta,emoji,label};
   });
-  $("betArea").classList.add("hidden");
-  $("gamePlayers").innerHTML=state.players.map(p=>`<div class="pbar"><span>${escapeHtml(p.name)} · 베팅 ${fmt(p.bet)}</span><b>${fmt(p.score)}</b></div>`).join("");
-  setTimeout(()=>{
-    const outcomes=["success","success","success","jackpot","fail","fail","bomb"];
-    state.results=state.players.map(p=>{
-      const outcome=outcomes[Math.floor(Math.random()*outcomes.length)];
-      let delta=0,emoji="🟢",label="성공!";
-      if(outcome==="success"){delta=p.bet;emoji="🟢";label="성공!";}
-      if(outcome==="jackpot"){delta=p.bet*2;emoji="⚡";label="대박!";}
-      if(outcome==="fail"){delta=-p.bet;emoji="🔴";label="실패...";}
-      if(outcome==="bomb"){delta=-p.bet*2;emoji="💀";label="폭탄!";}
-      delta=Math.max(-p.score,delta);p.score+=delta;
-      return {name:p.name,delta,emoji,label};
-    });
-    const mine=state.results.find(x=>x.name===state.name)||state.results[0];
+  const results=room.players.map(p=>p._lastDelta);
+  room.players.forEach(p=>{delete p._lastDelta; p.bet=null;});
+  room.lastResult={round:room.round, results};
+  room.log=[{round:room.round, results}, ...room.log].slice(0,20);
+
+  if(room.round>=ROUNDS){
+    room.phase="ended";
+  }else{
+    room.round+=1;
+  }
+  await saveRoom(room);
+  handlePlayingUpdate();
+}
+
+function handlePlayingUpdate(){
+  const room=state.room; if(!room)return;
+
+  if(room.lastResult && room.lastResult.round!==state.shownResultRound && room.lastResult.round===state.localRound){
+    state.shownResultRound=room.lastResult.round;
+    const mine = room.lastResult.results.find(r=>r.id===CLIENT_ID) || room.lastResult.results[0];
     $("resultBox").innerHTML=`<div class="emoji">${mine.emoji}</div><div class="big">${mine.label}</div><div>${mine.delta>=0?"+":""}${fmt(mine.delta)}점</div>`;
     $("resultBox").classList.remove("hidden");
-    $("gameLog").innerHTML=state.results.map(r=>`${r.emoji} ${escapeHtml(r.name)}: ${r.delta>=0?"+":""}${fmt(r.delta)}점`).join("<br>")+"<br>"+$("gameLog").innerHTML;
-    state.players.forEach(p=>p.bet=null);
-    if(state.round>=ROUNDS){
-      setTimeout(endGame,1800);
-    }else{
-      state.round++;state.selected=null;state.pending=false;
-      setTimeout(()=>{$("resultBox").classList.add("hidden");$("betArea").classList.remove("hidden");renderGame()},1800);
-    }
-  },700);
-};
-function endGame(){
-  const sorted=[...state.players].sort((a,b)=>b.score-a.score);
-  $("winnerText").textContent=`${sorted[0].name}님이 ${fmt(sorted[0].score)}점으로 우승했습니다!`;
-  $("finalScores").innerHTML=sorted.map((p,i)=>`<div class="pbar"><span>${i+1}위 · ${escapeHtml(p.name)}</span><b>${fmt(p.score)}점</b></div>`).join("");
+    $("betArea").classList.add("hidden");
+    $("gameLog").innerHTML=room.lastResult.results.map(r=>`${r.emoji} ${escapeHtml(r.name)}: ${r.delta>=0?"+":""}${fmt(r.delta)}점`).join("<br>")+"<br>"+$("gameLog").innerHTML;
+
+    state.selected=null;
+    state.localRound=room.round;
+
+    setTimeout(()=>{
+      $("resultBox").classList.add("hidden");
+      $("betArea").classList.remove("hidden");
+      renderGame();
+    },1800);
+  }else{
+    renderGame();
+  }
+}
+
+function renderEnd(){
+  const room=state.room; if(!room)return;
+  const sorted=[...room.players].sort((a,b)=>b.score-a.score);
+  $("winnerText").textContent=`${escapeHtml(sorted[0].name)}님이 ${fmt(sorted[0].score)}점으로 우승했습니다!`;
+  $("finalScores").innerHTML=sorted.map((p,i)=>`<div class="pbar"><span>${i+1}위 · ${escapeHtml(p.name)}${p.id===CLIENT_ID?" (나)":""}</span><b>${fmt(p.score)}점</b></div>`).join("");
   show("end");
 }
 </script>
