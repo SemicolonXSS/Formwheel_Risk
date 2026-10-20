@@ -34,8 +34,8 @@ let state={
 const $=id=>document.getElementById(id);
 const fmt=n=>n.toLocaleString("ko-KR");
 function show(id){["home","lobby","game","end"].forEach(x=>$(x).classList.toggle("hidden",x!==id));}
-function randomCode(){return Math.floor(100000+Math.random()*900000).toString();}
-function escapeHtml(s){return s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+function randomCode(){return String(100000+crypto.getRandomValues(new Uint32Array(1))[0]%900000);}
+function escapeHtml(s){return String(s ?? '').replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
 function getName(){
   const n=$("nameInput").value.trim();
   if(!n){alert("닉네임을 입력해주세요.");return null}
