@@ -39,8 +39,11 @@ function escapeHtml(s){return String(s ?? '').replace(/[&<>"']/g,c=>({"&":"&amp;
 function getName(){
   const n=$("nameInput").value.trim();
   if(!n){alert("닉네임을 입력해주세요.");return null}
-  return n.replace(/\s+/g," ").slice(0,16);
+  const name=n.replace(/\s+/g," ").slice(0,16);
+  try{localStorage.setItem("formwheel_risk_name",name)}catch{}
+  return name;
 }
+try{const savedName=localStorage.getItem("formwheel_risk_name");if(savedName && $("nameInput"))$("nameInput").value=savedName.slice(0,16)}catch{}
 function roomRef(code){ return ref(db, "rooms/"+code); }
 function showConnErr(msg){ const el=$("connErr"); el.textContent=msg; el.classList.remove("hidden"); }
 
