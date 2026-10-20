@@ -39,7 +39,7 @@ function escapeHtml(s){return String(s ?? '').replace(/[&<>"']/g,c=>({"&":"&amp;
 function getName(){
   const n=$("nameInput").value.trim();
   if(!n){alert("닉네임을 입력해주세요.");return null}
-  return n;
+  return n.replace(/\s+/g," ").slice(0,16);
 }
 function roomRef(code){ return ref(db, "rooms/"+code); }
 function showConnErr(msg){ const el=$("connErr"); el.textContent=msg; el.classList.remove("hidden"); }
@@ -123,7 +123,8 @@ async function handleRoomSnapshot(fresh){
 $("createBtn").onclick=async ()=>{
   const n=getName(); if(!n)return;
   state.name=n;
-  const code=randomCode();
+  let code=randomCode();
+  for(let tries=0;tries<10 && await loadRoom(code);tries++)code=randomCode();
   const room={
     code, phase:"lobby", round:1, hostId:CLIENT_ID,
     players:[{id:CLIENT_ID,name:n,score:START_SCORE,bet:null}],
